@@ -1,80 +1,55 @@
-from fastapi import FastAPI, HTTPException, Security, Request
-from fastapi.security import APIKeyHeader
-from fastapi.middleware.cors import CORSMiddleware
+# main.py
+from __future__ import annotations
+from fastapi import FastAPI, HTTPException, Header
+from fastapi.responses import JSONResponse
+from pathlib import Path
+import time
 import hashlib
 
-# --------------------------
-# CONFIG
-# --------------------------
-API_KEY_NAME = "x-api-key"
-VALID_KEYS = {"mysecretapikey"}  # <-- change to your real API key
-PWNED_FILE = "data/rockyou_pwned.txt"
+from auth import load_api_keys, api_key_ok, check_rate_limit
+from db_loader import load_hash_file, lookup
 
-# FastAPI app
-app = FastAPI(
-    title="Pwned Passwords API",
-    description="Check if a password has been exposed in known breaches.",
-    version="1.0.0"
-)
+DATA_FILE = Path("data/rockyou_pwned.txt")  # small local sample for dev
+app = FastAPI(title="Pwned Check (Dev)")
 
-# Enable CORS if frontend will call this API
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # change to your domain in production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+@app.on_event("startup")
+async def startup() -> None:
+    t0 = time.time()
+    load_api_keys()
+    loaded = load_hash_file(DATA_FILE)
+    print(f"🔐 API keys loaded, 🔎 {loaded:,} hashes in memory (startup {time.time()-t0:.2f}s)")
 
-# API Key header
-api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
+@app.get("/healthz")
+async def healthz():
+    return {"ok": True, "message": "alive"}
 
+# 🔹 Old endpoint (hash-based)
+@app.get("/check/{sha1}")
+async def check_sha1(sha1: str, x_api_key: str = Header(None)):
+    if not x_api_key or not api_key_ok(x_api_key):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
-# --------------------------
-# Middleware (skip docs)
-# --------------------------
-@app.middleware("http")
-async def verify_api_key(request: Request, call_next):
-    if request.url.path in ["/docs", "/openapi.json", "/redoc"]:
-        return await call_next(request)
+    if not check_rate_limit(x_api_key):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
 
-    api_key = request.headers.get(API_KEY_NAME)
-    if not api_key or api_key not in VALID_KEYS:
-        return HTTPException(status_code=401, detail="Invalid or missing API key")
+    h = sha1.strip().upper()
+    if len(h) != 40:
+        raise HTTPException(status_code=400, detail="sha1 must be 40 hex chars")
 
-    return await call_next(request)
+    count = lookup(h)
+    return JSONResponse({"found": count > 0, "count": count})
 
-
-# --------------------------
-# Helper function
-# --------------------------
-def is_password_pwned(password: str) -> int:
-    """Check if password hash exists in pwnedpasswords file. Returns count if found."""
-    sha1 = hashlib.sha1(password.encode("utf-8")).hexdigest().upper()
-    with open(PWNED_FILE, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            hash_prefix, count = line.strip().split(":")
-            if sha1 == hash_prefix:
-                return int(count)
-    return 0
-
-
-# --------------------------
-# Routes
-# --------------------------
+# 🔹 New endpoint (password-based)
 @app.get("/check_password/{password}")
-async def check_password(password: str, api_key: str = Security(api_key_header)):
-    if api_key not in VALID_KEYS:
-        raise HTTPException(status_code=401, detail="Invalid API Key")
+async def check_password(password: str, x_api_key: str = Header(None)):
+    if not x_api_key or not api_key_ok(x_api_key):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
-    count = is_password_pwned(password)
-    return {
-        "password": password,
-        "pwned": count > 0,
-        "times_seen": count
-    }
+    if not check_rate_limit(x_api_key):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
 
+    # hash password -> sha1
+    h = hashlib.sha1(password.encode("utf-8")).hexdigest().upper()
 
-@app.get("/")
-async def root():
-    return {"message": "Pwned Passwords API is running. Go to /docs for Swagger UI."}
+    count = lookup(h)
+    return JSONResponse({"found": count > 0, "count": count, "sha1": h})
