@@ -1,36 +1,37 @@
 # main.py
 from __future__ import annotations
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.responses import JSONResponse
+import hashlib
 import time
 
-from auth import load_api_keys, api_key_ok, check_rate_limit
-from db_loader import load_hash_file, lookup
+from auth import load_api_keys, verify_api_key
+from db_loader import init_db, load_hash_file, lookup
 
-app = FastAPI(title="Pwned Check (Bank Edition)")
+app = FastAPI(title="Pwned Check (Bank API)")
 
 @app.on_event("startup")
-async def startup() -> None:
+async def on_startup():
     t0 = time.time()
     load_api_keys()
-    loaded = load_hash_file(None)  # now no-op
-    print(f"🔐 API keys loaded (startup {time.time()-t0:.2f}s)")
+    init_db()            # ensure table exists (no in-memory load)
+    load_hash_file(None) # kept for compatibility; returns 0
+    print(f"🔐 Startup complete (took {time.time()-t0:.2f}s)")
 
 @app.get("/healthz")
 async def healthz():
     return {"ok": True, "message": "alive"}
 
 @app.get("/check/{sha1}")
-async def check_password(sha1: str, x_api_key: str = Header(None)):
-    if not x_api_key or not api_key_ok(x_api_key):
-        raise HTTPException(status_code=401, detail="Invalid or missing API key")
-
-    if not check_rate_limit(x_api_key):
-        raise HTTPException(status_code=429, detail="Rate limit exceeded")
-
+async def check_sha1(sha1: str, _auth: bool = Depends(verify_api_key)):
     h = sha1.strip().upper()
     if len(h) != 40:
         raise HTTPException(status_code=400, detail="sha1 must be 40 hex chars")
-
     count = lookup(h)
     return JSONResponse({"found": count > 0, "count": count})
+
+@app.get("/check_password/{password}")
+async def check_password(password: str, _auth: bool = Depends(verify_api_key)):
+    sha1 = hashlib.sha1(password.encode("utf-8")).hexdigest().upper()
+    count = lookup(sha1)
+    return JSONResponse({"password": password, "sha1": sha1, "found": count > 0, "count": count})
