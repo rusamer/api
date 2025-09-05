@@ -1,0 +1,91 @@
+from fastapi import FastAPI, HTTPException, Header
+from pathlib import Path
+import json
+import time
+
+app = FastAPI()
+
+HASHES = {}
+API_KEYS = {}
+
+
+# ----------------------------
+# Load hashes from file
+# ----------------------------
+def load_hashes():
+    global HASHES
+    HASHES = {}
+
+    file_path = Path("data/rockyou_pwned.txt")  # adjust to your file
+
+    if not file_path.exists():
+        print(f"❌ Hash file not found: {file_path}")
+        return
+
+    print(f"📂 Loading hashes from {file_path} ...")
+    count = 0
+
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            parts = line.strip().split(":")
+            if len(parts) == 2:
+                sha1, num = parts
+                HASHES[sha1.upper()] = int(num)
+            count += 1
+            if count % 5000 == 0:
+                print(f"   → {count} hashes loaded...")
+
+    print(f"✅ Finished loading {count} hashes total")
+
+
+# ----------------------------
+# Load API keys
+# ----------------------------
+def load_api_keys():
+    global API_KEYS
+    file_path = Path("keys.json")
+
+    if not file_path.exists():
+        print("⚠️  No keys.json found, creating a default one...")
+        with open(file_path, "w") as f:
+            json.dump({"bankdev123": {"limit": 100}}, f)
+
+    with open(file_path, "r") as f:
+        API_KEYS = json.load(f)
+
+    print(f"🔑 Loaded {len(API_KEYS)} API keys")
+
+
+# ----------------------------
+# Startup event
+# ----------------------------
+@app.on_event("startup")
+async def startup_event():
+    print("🚀 Startup event triggered")
+    start = time.time()
+    try:
+        load_hashes()
+        load_api_keys()
+    except Exception as e:
+        print(f"❌ Error during startup: {e}")
+        raise
+    print(f"✅ Startup complete in {time.time()-start:.2f}s")
+
+
+# ----------------------------
+# API endpoint
+# ----------------------------
+@app.get("/check/{sha1}")
+async def check_password(
+    sha1: str,
+    x_api_key: str = Header(None)
+):
+    # Verify API key
+    if not x_api_key or x_api_key not in API_KEYS:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+    sha1 = sha1.upper()
+    found = sha1 in HASHES
+    count = HASHES.get(sha1, 0)
+
+    return {"found": found, "count": count}

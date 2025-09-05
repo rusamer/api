@@ -1,0 +1,106 @@
+import json
+from pathlib import Path
+
+KEYS_FILE = Path("keys.json")
+
+
+def load_keys():
+    if not KEYS_FILE.exists():
+        print("⚠️ No keys.json found, creating an empty one...")
+        with open(KEYS_FILE, "w") as f:
+            json.dump({}, f)
+    with open(KEYS_FILE, "r") as f:
+        return json.load(f)
+
+
+def save_keys(keys):
+    with open(KEYS_FILE, "w") as f:
+        json.dump(keys, f, indent=4)
+    print("✅ Keys saved successfully.")
+
+
+def list_keys(keys):
+    if not keys:
+        print("📭 No API keys found.")
+        return
+    print("\n🔑 Existing API Keys:")
+    for key, info in keys.items():
+        limit = info.get("limit", "N/A")
+        print(f"   • {key}  →  {limit} requests/min")
+
+
+def add_key(keys):
+    new_key = input("Enter new API key: ").strip()
+    if new_key in keys:
+        print("❌ Key already exists.")
+        return
+    try:
+        limit = int(input("Enter requests per minute limit: "))
+    except ValueError:
+        print("❌ Invalid number.")
+        return
+    keys[new_key] = {"limit": limit}
+    save_keys(keys)
+    print(f"🎉 API key '{new_key}' added with limit {limit}/min")
+
+
+def edit_key(keys):
+    key = input("Enter API key to edit: ").strip()
+    if key not in keys:
+        print("❌ Key not found.")
+        return
+    try:
+        new_limit = int(input("Enter new requests per minute limit: "))
+    except ValueError:
+        print("❌ Invalid number.")
+        return
+    keys[key]["limit"] = new_limit
+    save_keys(keys)
+    print(f"✏️ API key '{key}' updated with new limit {new_limit}/min")
+
+
+def delete_key(keys):
+    key = input("Enter API key to delete: ").strip()
+    if key not in keys:
+        print("❌ Key not found.")
+        return
+    confirm = input(f"Are you sure you want to delete '{key}'? (y/n): ").lower()
+    if confirm == "y":
+        keys.pop(key)
+        save_keys(keys)
+        print(f"🗑️ API key '{key}' deleted.")
+    else:
+        print("❌ Cancelled.")
+
+
+def menu():
+    keys = load_keys()
+    while True:
+        print("\n===== 🔐 API Key Manager =====")
+        print("1. List API keys")
+        print("2. Add new API key")
+        print("3. Edit existing API key limit")
+        print("4. Delete API key")
+        print("5. Exit")
+
+        choice = input("Choose an option: ").strip()
+        if choice == "1":
+            list_keys(keys)
+        elif choice == "2":
+            add_key(keys)
+            keys = load_keys()
+        elif choice == "3":
+            edit_key(keys)
+            keys = load_keys()
+        elif choice == "4":
+            delete_key(keys)
+            keys = load_keys()
+        elif choice == "5":
+            print("👋 Exiting API Key Manager.")
+            break
+        else:
+            print("❌ Invalid option, try again.")
+
+
+if __name__ == "__main__":
+    menu()
