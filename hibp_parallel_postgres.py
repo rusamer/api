@@ -38,7 +38,7 @@ def configure_postgres_data_path():
     input("Press Enter to continue...")
     os.makedirs(POSTGRES_DATA_PATH, exist_ok=True)
     print(f"✅ Directory {POSTGRES_DATA_PATH} ready for PostgreSQL data.")
-    print("⚠️ You must manually configure your postgresql.conf:")
+    print("⚠️RUsamer : must manually configure postgresql.conf:")
     print(f"data_directory = '{POSTGRES_DATA_PATH}'")
     input("After editing postgresql.conf and restarting PostgreSQL, press Enter to continue...")
 
