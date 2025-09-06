@@ -57,8 +57,22 @@ def stream_copy_file(conn, file_path):
     print(f"📥 Starting COPY from {file_path} into pwned_tmp (this may take a while)...")
 
     started = time.time()
-    with open(file_path, "r", encoding="utf-8", errors="ignore") as fh:
-        cur.copy_expert(sql, fh)  # this streams directly to postgres
+    lines_processed = 0
+with open(file_path, "r", encoding="utf-8", errors="ignore") as fh:
+    started_read = time.time()
+    lines_processed = 0
+
+    while True:
+        chunk = fh.read(1024 * 1024 * 10)  # Read in 10MB chunks
+        if not chunk:
+            break
+        cur.copy_expert(sql, chunk)
+        lines_processed += chunk.count("\n")
+        elapsed = time.time() - started_read
+        print(f"Progress: {lines_processed:,} lines processed... (Elapsed Time: {elapsed:.2f}s)")
+
+    print(f"📥 Total lines processed: {lines_processed:,}")
+
     print(f"✅ COPY finished in {time.time()-started:.2f}s")
 
     cur.execute("SELECT COUNT(*) FROM pwned_tmp;")
@@ -68,6 +82,7 @@ def stream_copy_file(conn, file_path):
     print("🔁 Merging into final table (hashes)...")
     started = time.time()
     merge_tmp_to_hashes(cur)
+    print(f"Progress: Merge operation running (Elapsed: {time.time()-started:.2f}s)...")
     print(f"✅ Merge complete in {time.time()-started:.2f}s")
 
     print("🧹 Dropping temporary table...")
