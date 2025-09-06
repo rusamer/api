@@ -1,16 +1,20 @@
 """
-All-in-one HIBP SHA1:COUNT import to Postgres
-- Configure Postgres to use custom data path
-- Parallel batch streaming
-- PostgreSQL tuning
+Full HIBP SHA1:COUNT import into PostgreSQL using a local txt file.
+
+Features:
+- Reads HIBP txt file in parallel batches
 - Live global progress counter
+- PostgreSQL tuning for bulk import
+- Temp tables merged safely into final table
+- Prompts for custom PostgreSQL data path
 """
+
 import os
 import time
 import psycopg2
-import subprocess
-from multiprocessing import Queue, Process, cpu_count, Manager
+from queue import Queue
 from threading import Thread
+from multiprocessing import Value, cpu_count
 
 # =========================
 # CONFIGURATION
@@ -21,10 +25,10 @@ DB_PASS = os.getenv("DB_PASS", "P@ssw0rd512")
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_PORT = os.getenv("DB_PORT", "5432")
 
-POSTGRES_DATA_PATH = "/home/samer/api/data"  # custom DB storage path
+POSTGRES_DATA_PATH = "/home/samer/api/data"  # Custom PostgreSQL data path
+HIBP_FILE = "/home/samer/api/data/pwned.txt"  # Local HIBP txt file
 NUM_WORKERS = max(1, cpu_count() - 1)
-BATCH_SIZE = 1_000_000
-HIBP_COMMAND = ["haveibeenpwned-downloader", "--format", "sha1ordered", "--output", "-"]
+BATCH_SIZE = 1_000_000  # Number of lines per batch
 
 # =========================
 # POSTGRES SETUP
@@ -47,9 +51,6 @@ def get_conn():
         port=DB_PORT
     )
 
-# =========================
-# POSTGRES TUNING
-# =========================
 def tune_postgres(conn):
     cur = conn.cursor()
     print("⚡ Tuning PostgreSQL for bulk import...")
@@ -61,7 +62,7 @@ def tune_postgres(conn):
     print("✅ PostgreSQL tuned.")
 
 # =========================
-# BATCH PROCESSING
+# DATABASE FUNCTIONS
 # =========================
 def create_final_table(cur):
     cur.execute("""
@@ -84,7 +85,13 @@ def vacuum_hashes(cur):
     cur.execute("VACUUM ANALYZE hashes;")
     cur.connection.commit()
 
-def process_batch(batch_lines, batch_id, total_counter, total_lines_estimate):
+# =========================
+# BATCH PROCESSING
+# =========================
+def process_batch(batch_lines, batch_id, total_counter):
+    # Filter invalid lines just in case
+    batch_lines = [line for line in batch_lines if ':' in line and line.split(':')[1].isdigit()]
+
     temp_table = f"pwned_tmp_{batch_id}"
     conn = get_conn()
     cur = conn.cursor()
@@ -94,37 +101,43 @@ def process_batch(batch_lines, batch_id, total_counter, total_lines_estimate):
 
     from io import StringIO
     buffer = StringIO("\n".join(batch_lines))
-    cur.copy_expert(f"COPY {temp_table} (sha1, count) FROM STDIN WITH (FORMAT text, DELIMITER ':' )", buffer)
+    cur.copy_expert(
+        f"COPY {temp_table} (sha1, count) FROM STDIN WITH (FORMAT text, DELIMITER ':' )",
+        buffer
+    )
 
-    # Update global counter
-    total_counter.value += len(batch_lines)
-    percent = (total_counter.value / total_lines_estimate) * 100 if total_lines_estimate else 0
-    print(f"[Batch {batch_id}] ✅ Loaded {len(batch_lines):,} lines. Global progress: {total_counter.value:,} lines (~{percent:.2f}%)")
+    # Update global progress
+    with total_counter.get_lock():
+        total_counter.value += len(batch_lines)
+        print(f"[Batch {batch_id}] Loaded {len(batch_lines):,} lines. Total inserted: {total_counter.value:,}")
 
     # Merge into final table
     merge_temp_to_hashes(cur, temp_table)
     cur.execute(f"DROP TABLE IF EXISTS {temp_table};")
     conn.commit()
     conn.close()
+    print(f"[Batch {batch_id}] ✅ Merged and temp table dropped.")
 
-# =========================
-# MAIN STREAM WORKER
-# =========================
-def batch_worker(queue, total_counter, total_lines_estimate):
+def batch_worker(queue, total_counter):
     while True:
         item = queue.get()
         if item is None:
             break
         batch_id, batch_lines = item
-        process_batch(batch_lines, batch_id, total_counter, total_lines_estimate)
+        process_batch(batch_lines, batch_id, total_counter)
         queue.task_done()
 
 # =========================
 # MAIN FUNCTION
 # =========================
 def main():
+    if not os.path.exists(HIBP_FILE):
+        print(f"HIBP file not found: {HIBP_FILE}")
+        return
+
     configure_postgres_data_path()
 
+    # Connect and tune
     conn = get_conn()
     tune_postgres(conn)
     cur = conn.cursor()
@@ -132,38 +145,35 @@ def main():
     conn.commit()
     conn.close()
 
-    print("🚀 Starting dynamic streaming from HIBP...")
-    manager = Manager()
-    total_counter = manager.Value('i', 0)
-    total_lines_estimate = 0  # unknown; will remain zero until finish
-
-    queue = Queue(maxsize=NUM_WORKERS * 2)
+    print("🚀 Starting import from HIBP txt file...")
+    queue = Queue(maxsize=NUM_WORKERS*2)
+    total_counter = Value('i', 0)
     threads = []
+
+    # Start worker threads
     for _ in range(NUM_WORKERS):
-        t = Thread(target=batch_worker, args=(queue, total_counter, total_lines_estimate))
+        t = Thread(target=batch_worker, args=(queue, total_counter))
         t.start()
         threads.append(t)
 
+    # Read file and queue batches
     batch_lines = []
     batch_id = 0
     start_time = time.time()
+    with open(HIBP_FILE, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            batch_lines.append(line.strip())
+            if len(batch_lines) >= BATCH_SIZE:
+                batch_id += 1
+                queue.put((batch_id, batch_lines))
+                print(f"[Main] Queued batch {batch_id} with {len(batch_lines):,} lines...")
+                batch_lines = []
 
-    process = subprocess.Popen(HIBP_COMMAND, stdout=subprocess.PIPE, bufsize=10**7, text=True)
-
-    for line in process.stdout:
-        batch_lines.append(line.strip())
-        if len(batch_lines) >= BATCH_SIZE:
+        # Last batch
+        if batch_lines:
             batch_id += 1
             queue.put((batch_id, batch_lines))
-            batch_lines = []
-
-    # Last batch
-    if batch_lines:
-        batch_id += 1
-        queue.put((batch_id, batch_lines))
-
-    process.stdout.close()
-    process.wait()
+            print(f"[Main] Queued final batch {batch_id} with {len(batch_lines):,} lines...")
 
     # Stop workers
     queue.join()
@@ -172,7 +182,7 @@ def main():
     for t in threads:
         t.join()
 
-    # Vacuum final table
+    # Vacuum
     conn = get_conn()
     cur = conn.cursor()
     print("🔎 Running VACUUM ANALYZE on final hashes table...")
